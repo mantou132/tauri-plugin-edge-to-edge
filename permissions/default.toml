@@ -1,3 +1,10 @@
 [default]
 description = "Default permissions for the plugin"
-permissions = ["allow-ping"]
+permissions = [
+  "allow-get-safe-area-insets",
+  "allow-get-keyboard-info",
+  "allow-enable",
+  "allow-disable",
+  "allow-show-keyboard",
+  "allow-hide-keyboard"
+]
