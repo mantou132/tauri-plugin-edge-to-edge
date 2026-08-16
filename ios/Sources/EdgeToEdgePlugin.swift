@@ -2,6 +2,7 @@ import SwiftRs
 import Tauri
 import UIKit
 import WebKit
+import Darwin
 
 // MARK: - Edge-to-Edge Plugin
 // 为 iOS 提供全屏沉浸式体验支持
@@ -16,6 +17,9 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     private var stageManagerOffset: CGFloat = 0  // iPad Stage Manager 支持
     private var keyboardStateVersion: Int = 0  // 状态版本号，用于取消过期的回调
     private var periodicInjectionCompleted = false  // 周期性注入是否完成
+    private lazy var deviceScreenCornerRadius = Self.screenCornerRadius(
+        for: Self.hardwareModelIdentifier()
+    )
     
     // MARK: - Lifecycle
     
@@ -289,6 +293,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         let right = safeArea.right
         let bottom = safeArea.bottom
         let left = safeArea.left
+        let screenCornerRadius = deviceScreenCornerRadius
         
         // 键盘显示时，底部安全区域为0（键盘已覆盖Home Indicator）
         // 键盘隐藏时，确保最小安全区域（iPhone X 等有 Home Indicator）
@@ -317,15 +322,75 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             style.setProperty('--content-bottom-padding', '\(computedBottom)px');
             style.setProperty('--keyboard-height', '\(keyboardHeight)px');
             style.setProperty('--keyboard-visible', '\(keyboardVisible ? "1" : "0")');
+            style.setProperty('--screen-corner-radius', '\(screenCornerRadius)px');
             window.dispatchEvent(new CustomEvent('safeAreaChanged', {
-                detail: { top: \(top), right: \(right), bottom: \(computedBottom), left: \(left), keyboardHeight: \(keyboardHeight), keyboardVisible: \(keyboardVisible) }
+                detail: { top: \(top), right: \(right), bottom: \(computedBottom), left: \(left), screenCornerRadius: \(screenCornerRadius), keyboardHeight: \(keyboardHeight), keyboardVisible: \(keyboardVisible) }
             }));
         })();
         """
         
         webview.evaluateJavaScript(jsCode, completionHandler: nil)
     }
-    
+
+    // MARK: - Screen Corner Radius
+
+    /// `UIScreen` does not expose a public display-corner-radius API. Use the
+    /// stable hardware identifier instead of the private `_displayCornerRadius`
+    /// selector so this remains safe for App Store distribution. Values are in
+    /// points, which match WebKit CSS pixels on iOS.
+    private static func hardwareModelIdentifier() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machine = withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                String(cString: $0)
+            }
+        }
+
+        #if targetEnvironment(simulator)
+        return ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] ?? machine
+        #else
+        return machine
+        #endif
+    }
+
+    /// Returns the device display corner radius in points for known iPhones.
+    /// Unknown devices deliberately return zero until their geometry is verified.
+    private static func screenCornerRadius(for model: String) -> CGFloat {
+        switch model {
+        // iPhone X, XS, XS Max, 11 Pro, 11 Pro Max
+        case "iPhone10,3", "iPhone10,6", "iPhone11,2", "iPhone11,4", "iPhone11,6", "iPhone12,3", "iPhone12,5":
+            return 39
+
+        // iPhone XR, 11
+        case "iPhone11,8", "iPhone12,1":
+            return 41.5
+
+        // iPhone 12 mini, 13 mini
+        case "iPhone13,1", "iPhone14,4":
+            return 44
+
+        // iPhone 12, 12 Pro, 13, 13 Pro, 14, 16e
+        case "iPhone13,2", "iPhone13,3", "iPhone14,5", "iPhone14,2", "iPhone14,7", "iPhone17,5":
+            return 47.33
+
+        // iPhone 12 Pro Max, 13 Pro Max, 14 Plus
+        case "iPhone13,4", "iPhone14,3", "iPhone14,8":
+            return 53.33
+
+        // iPhone 14 Pro, 14 Pro Max, iPhone 15 series, iPhone 16, 16 Plus
+        case "iPhone15,2", "iPhone15,3", "iPhone15,4", "iPhone15,5", "iPhone16,1", "iPhone16,2", "iPhone17,3", "iPhone17,4":
+            return 55
+
+        // iPhone 16 Pro, 16 Pro Max, iPhone 17 series, iPhone Air
+        case "iPhone17,1", "iPhone17,2", "iPhone18,1", "iPhone18,2", "iPhone18,3", "iPhone18,4":
+            return 62
+
+        default:
+            return 0
+        }
+    }
+
     // MARK: - Commands
     
     @objc public func getSafeAreaInsets(_ invoke: Invoke) throws {

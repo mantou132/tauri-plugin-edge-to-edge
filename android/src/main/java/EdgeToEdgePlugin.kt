@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.RoundedCorner
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
@@ -254,7 +255,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
             val leftDp = insets.left / density
             val keyboardDp = keyboardHeight / density
             val computedBottom = maxOf(bottomDp, 48f)
-
+            val screenCornerRadiusDp = getScreenCornerRadiusPx() / density
             val jsCode = """
                 (function() {
                     var style = document.documentElement.style;
@@ -271,12 +272,14 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     style.setProperty('--content-bottom-padding', '${computedBottom + 16}px');
                     style.setProperty('--keyboard-height', '${keyboardDp}px');
                     style.setProperty('--keyboard-visible', '${if (isKeyboardVisible) "1" else "0"}');
+                    style.setProperty('--screen-corner-radius', '${screenCornerRadiusDp}px');
                     window.dispatchEvent(new CustomEvent('safeAreaChanged', {
                         detail: {
                             top: $topDp,
                             right: $rightDp,
                             bottom: $bottomDp,
                             left: $leftDp,
+                            screenCornerRadius: $screenCornerRadiusDp,
                             keyboardHeight: $keyboardDp,
                             keyboardVisible: $isKeyboardVisible
                         }
@@ -286,6 +289,28 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
 
             wv.evaluateJavascript(jsCode, null)
         }
+    }
+
+    /**
+     * 读取当前窗口内的设备物理圆角半径（px）。
+     *
+     * `WindowInsets.getRoundedCorner` 从 Android 12（API 31）开始提供；
+     * 更低版本没有公开的等价 API，因此回退为 0。
+     */
+    private fun getScreenCornerRadiusPx(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return 0
+        }
+
+        val windowInsets = activity.window.decorView.rootWindowInsets ?: return 0
+        return listOf(
+            RoundedCorner.POSITION_TOP_LEFT,
+            RoundedCorner.POSITION_TOP_RIGHT,
+            RoundedCorner.POSITION_BOTTOM_RIGHT,
+            RoundedCorner.POSITION_BOTTOM_LEFT
+        ).mapNotNull { position ->
+            windowInsets.getRoundedCorner(position)?.radius
+        }.maxOrNull() ?: 0
     }
 
     /**

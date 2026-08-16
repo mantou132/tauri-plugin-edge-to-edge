@@ -44,6 +44,7 @@ pub fn run() {
 | `--safe-area-bottom-computed` | 计算后的底部区域 |
 | `--keyboard-height` | 键盘高度 |
 | `--keyboard-visible` | 键盘是否可见 (1/0) |
+| `--screen-corner-radius` | 屏幕物理圆角半径（Android 12+；取四个角中的最大值） |
 
 ### CSS 示例
 
@@ -58,13 +59,17 @@ pub fn run() {
   bottom: 0;
   padding-bottom: var(--safe-area-bottom, 0px);
 }
+
+.screen-corner-aware {
+  border-radius: var(--screen-corner-radius, 0px);
+}
 ```
 
 ### 事件监听
 
 ```javascript
 window.addEventListener('safeAreaChanged', (event) => {
-  const { top, bottom, keyboardHeight, keyboardVisible } = event.detail;
+  const { top, bottom, screenCornerRadius, keyboardHeight, keyboardVisible } = event.detail;
   console.log('Safe area changed:', event.detail);
 });
 ```
@@ -73,6 +78,6 @@ window.addEventListener('safeAreaChanged', (event) => {
 
 | 平台 | 支持 |
 |------|------|
-| iOS | |
-| Android | |
+| iOS | 按硬件型号注入已验证 iPhone 的圆角半径；未知型号为 `0px`（不使用私有 API） |
+| Android | Android 12+ 注入设备圆角半径；低版本为 `0px` |
 | macOS/Windows/Linux | (返回默认值)
