@@ -34,7 +34,7 @@ impl<R: Runtime, T: Manager<R>> crate::EdgeToEdgeExt<R> for T {
 
 /// Initializes the plugin.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-  Builder::new("edge-to-edge")
+  let builder = Builder::new("edge-to-edge")
     .invoke_handler(tauri::generate_handler![
       commands::get_safe_area_insets,
       commands::get_keyboard_info,
@@ -42,7 +42,15 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       commands::disable,
       commands::show_keyboard,
       commands::hide_keyboard
-    ])
+    ]);
+
+  // Tauri runs plugin initialization scripts at document start on every
+  // navigation. Keep this file under `src/` so Cargo includes it in the
+  // published crate; `guest-js/` is the separately published npm API source.
+  #[cfg(mobile)]
+  let builder = builder.js_init_script(include_str!("webview-init.js"));
+
+  builder
     .setup(|app, api| {
       #[cfg(mobile)]
       let edge_to_edge = mobile::init(app, api)?;

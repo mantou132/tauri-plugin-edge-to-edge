@@ -1,8 +1,8 @@
 {
   "name": "tauri-plugin-edge-to-edge-api",
   "version": "0.1.0",
-  "author": "You",
-  "description": "",
+  "author": "mantou132",
+  "description": "JavaScript API for tauri-plugin-edge-to-edge",
   "type": "module",
   "types": "./dist-js/index.d.ts",
   "main": "./dist-js/index.cjs",

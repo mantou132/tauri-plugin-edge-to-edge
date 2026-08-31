@@ -1,15 +1,16 @@
 package com.plugin.edgetoedge
 
 import android.app.Activity
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.RoundedCorner
-import android.view.View
 import android.view.inputmethod.InputMethodManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
-import android.widget.FrameLayout
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -19,28 +20,61 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import app.tauri.plugin.Invoke
+import org.json.JSONObject
+
+private class EdgeToEdgeStateBridge(
+    private val onGetState: () -> String,
+    private val onRequestState: () -> Unit
+) {
+    @JavascriptInterface
+    fun getState(): String {
+        return onGetState.invoke()
+    }
+
+    @JavascriptInterface
+    fun requestState() {
+        onRequestState.invoke()
+    }
+}
 
 /**
  * Edge-to-Edge 插件 - Android 实现
- * 完美复制 Capacitor 版本的实现逻辑
  * 为 Android 提供全屏沉浸式体验支持
  */
 @TauriPlugin
 class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
+    companion object {
+        private const val NATIVE_BRIDGE_NAME = "__TAURI_EDGE_TO_EDGE_NATIVE__"
+        private const val INTERNAL_API_NAME = "__TAURI_EDGE_TO_EDGE_INTERNAL__"
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val density = activity.resources.displayMetrics.density
+    private val javascriptBridge = EdgeToEdgeStateBridge(::getCachedStateJson, ::injectCurrentState)
     private var webView: WebView? = null
-    private var cachedInsets = SafeAreaInsets(0, 0, 0, 0)
-    private var lastKeyboardHeight = 0
-    private var lastKeyboardVisible = false
-    private var periodicInjectionCompleted = false  // 周期性注入是否完成
 
     data class SafeAreaInsets(val top: Int, val right: Int, val bottom: Int, val left: Int)
+
+    private data class NativeState(
+        val insets: SafeAreaInsets,
+        val keyboardHeight: Int,
+        val keyboardVisible: Boolean,
+        val screenCornerRadius: Int
+    )
+
+    // JavascriptInterface methods run on WebView's bridge thread. A single
+    // immutable volatile snapshot prevents mixed values during a refresh.
+    @Volatile
+    private var cachedState: NativeState? = null
 
     override fun load(webView: WebView) {
         super.load(webView)
         this.webView = webView
 
         activity.runOnUiThread {
+            // document-start 脚本会在首次加载、刷新和导航时请求最新状态。
+            webView.addJavascriptInterface(javascriptBridge, NATIVE_BRIDGE_NAME)
+
             // 1. 启用 Edge-to-Edge 模式
             enable()
 
@@ -51,16 +85,16 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
             setSystemBarAppearance()
 
             // 4. 设置键盘动画监听器 (Capacitor 官方 Keyboard 插件方式)
-            setupKeyboardAnimationListener()
+            setupKeyboardAnimationListener(webView)
 
             // 5. 设置 WindowInsets 监听器
-            setupWindowInsetsListener()
+            setupWindowInsetsListener(webView)
 
-            // 6. 周期性注入安全区域（覆盖页面加载过程，iOS 对齐）
-            startPeriodicInjection()
+            // 6. 不等待下一次系统回调，立即读取一次当前状态。
+            injectCurrentState()
         }
 
-        println("[EdgeToEdge] Plugin loaded successfully (Capacitor style)")
+        println("[EdgeToEdge] Plugin loaded successfully")
     }
 
     /**
@@ -104,7 +138,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                 android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
                 android.content.res.Configuration.UI_MODE_NIGHT_YES
 
-        WindowCompat.getInsetsController(window, decorView)?.apply {
+        WindowCompat.getInsetsController(window, decorView).apply {
             // 暗色主题 = 亮色图标, 亮色主题 = 暗色图标
             isAppearanceLightStatusBars = !isDarkTheme
             isAppearanceLightNavigationBars = !isDarkTheme
@@ -114,40 +148,19 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
-     * 周期性注入安全区域（覆盖页面加载过程）
-     * 与 iOS 的 startPeriodicInjection 对齐，前 5 秒每 0.5 秒注入一次，之后停止
-     */
-    private fun startPeriodicInjection() {
-        for (i in 1..10) {
-            mainHandler.postDelayed({
-                // 只在周期性注入未完成且键盘未显示时注入
-                if (!periodicInjectionCompleted && !lastKeyboardVisible) {
-                    injectSafeAreaToWebView(cachedInsets, false, 0)
-                }
-                // 最后一次注入后标记完成
-                if (i == 10) {
-                    periodicInjectionCompleted = true
-                }
-            }, i * 500L)
-        }
-    }
-
-    /**
      * 设置键盘动画监听器 (Capacitor 官方 Keyboard 插件方式)
      * 使用 WindowInsetsAnimationCompat.Callback 实现精确的键盘动画追踪
      * 完美复制自 Capacitor EdgeToEdge.setupKeyboardListener()
      */
-    private fun setupKeyboardAnimationListener() {
-        val content = activity.window.decorView.findViewById<FrameLayout>(android.R.id.content)
-        val rootView = content.rootView
-
+    private fun setupKeyboardAnimationListener(webView: WebView) {
         ViewCompat.setWindowInsetsAnimationCallback(
-            rootView,
-            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_STOP) {
+            webView,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
                 override fun onProgress(
                     insets: WindowInsetsCompat,
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>
                 ): WindowInsetsCompat {
+                    publishWindowInsets(insets)
                     return insets
                 }
 
@@ -155,7 +168,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     animation: WindowInsetsAnimationCompat,
                     bounds: WindowInsetsAnimationCompat.BoundsCompat
                 ): WindowInsetsAnimationCompat.BoundsCompat {
-                    val windowInsets = ViewCompat.getRootWindowInsets(rootView)
+                    val windowInsets = ViewCompat.getRootWindowInsets(webView)
                     val showingKeyboard = windowInsets?.isVisible(WindowInsetsCompat.Type.ime()) ?: false
                     val imeHeightPx = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
 
@@ -165,20 +178,18 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
 
                     if (showingKeyboard) {
                         println("[EdgeToEdge] Keyboard will show - Height: ${imeHeightDp}dp")
-                        // 键盘将要显示时注入
-                        injectSafeAreaToWebView(cachedInsets, true, imeHeightPx)
                     } else {
                         println("[EdgeToEdge] Keyboard will hide")
-                        // 键盘将要隐藏时注入
-                        injectSafeAreaToWebView(cachedInsets, false, 0)
                     }
+
+                    if (windowInsets != null) publishWindowInsets(windowInsets)
 
                     return super.onStart(animation, bounds)
                 }
 
                 override fun onEnd(animation: WindowInsetsAnimationCompat) {
                     super.onEnd(animation)
-                    val windowInsets = ViewCompat.getRootWindowInsets(rootView)
+                    val windowInsets = ViewCompat.getRootWindowInsets(webView)
                     val showingKeyboard = windowInsets?.isVisible(WindowInsetsCompat.Type.ime()) ?: false
                     val imeHeightPx = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
 
@@ -186,17 +197,14 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     val density = activity.resources.displayMetrics.density
                     val imeHeightDp = Math.round(imeHeightPx / density)
 
-                    lastKeyboardVisible = showingKeyboard
-                    lastKeyboardHeight = imeHeightPx
-
                     if (showingKeyboard) {
                         println("[EdgeToEdge] Keyboard did show - Height: ${imeHeightDp}dp")
                     } else {
                         println("[EdgeToEdge] Keyboard did hide")
                     }
 
-                    // 键盘动画结束后再次注入确保状态正确
-                    injectSafeAreaToWebView(cachedInsets, showingKeyboard, imeHeightPx)
+                    // 动画结束后强制补发最终状态。
+                    if (windowInsets != null) publishWindowInsets(windowInsets, force = true)
                 }
             }
         )
@@ -208,87 +216,149 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
      * 设置 WindowInsets 监听器
      * 用于获取系统栏 insets 并注入到 WebView
      */
-    private fun setupWindowInsetsListener() {
-        ViewCompat.setOnApplyWindowInsetsListener(activity.window.decorView) { view, windowInsets ->
-            val systemBarsInsets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val imeInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
-            val imeHeight = imeInsets.bottom
-            val isKeyboardVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
-
-            val newInsets = SafeAreaInsets(
-                top = systemBarsInsets.top,
-                right = systemBarsInsets.right,
-                bottom = systemBarsInsets.bottom,
-                left = systemBarsInsets.left
+    private fun setupWindowInsetsListener(webView: WebView) {
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, windowInsets ->
+            val state = publishWindowInsets(windowInsets)
+            println(
+                "[EdgeToEdge] WindowInsets - Top:${state.insets.top}, " +
+                    "Bottom:${state.insets.bottom}, " +
+                    "Keyboard:${state.keyboardVisible}(${state.keyboardHeight})"
             )
-
-            // 缓存 insets
-            cachedInsets = newInsets
-
-            // 注入安全区域 (键盘状态由 animation callback 处理，这里只处理系统栏)
-            if (!isKeyboardVisible) {
-                injectSafeAreaToWebView(cachedInsets, false, 0)
-            }
-
-            println("[EdgeToEdge] WindowInsets - Top:${newInsets.top}, Bottom:${newInsets.bottom}, Keyboard:$isKeyboardVisible($imeHeight)")
 
             windowInsets
         }
+
+        ViewCompat.requestApplyInsets(webView)
     }
 
     /**
-     * 注入安全区域到 WebView
+     * 读取当前窗口状态并注入。document-start bridge 会在每次页面刷新时调用它。
      */
-    private fun injectSafeAreaToWebView(
-        insets: SafeAreaInsets,
-        isKeyboardVisible: Boolean = false,
-        keyboardHeight: Int = 0
-    ) {
+    private fun injectCurrentState() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(::injectCurrentState)
+            return
+        }
+
+        val decorView = activity.window.decorView
+        val windowInsets = ViewCompat.getRootWindowInsets(decorView)
+        if (windowInsets == null) {
+            // 首次布局尚未完成；系统将在布局时调用上面的 listener。
+            ViewCompat.requestApplyInsets(decorView)
+            return
+        }
+
+        publishWindowInsets(windowInsets, force = true)
+    }
+
+    private fun stateFromWindowInsets(windowInsets: WindowInsetsCompat): NativeState {
+        // systemBars alone misses a landscape display cutout on some devices.
+        val safeInsets = windowInsets.getInsets(
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+        )
+        val keyboardVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
+        val keyboardHeight = if (keyboardVisible) {
+            windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+        } else {
+            0
+        }
+
+        return NativeState(
+            insets = SafeAreaInsets(
+                top = safeInsets.top,
+                right = safeInsets.right,
+                bottom = safeInsets.bottom,
+                left = safeInsets.left
+            ),
+            keyboardHeight = keyboardHeight,
+            keyboardVisible = keyboardVisible,
+            screenCornerRadius = getScreenCornerRadiusPx()
+        )
+    }
+
+    private fun publishWindowInsets(
+        windowInsets: WindowInsetsCompat,
+        force: Boolean = false
+    ): NativeState {
+        val next = stateFromWindowInsets(windowInsets)
+        val changed = next != cachedState
+        cachedState = next
+        if (changed || force) injectStateToWebView(next)
+        return next
+    }
+
+    /**
+     * Android JavascriptInterface 的返回值是同步的。刷新页面时可在 HTML 解析继续前
+     * 直接恢复上一次系统确认过的状态。
+     */
+    private fun getCachedStateJson(): String {
+        return cachedState?.let(::createStatePayload)?.toString() ?: ""
+    }
+
+    private fun createStatePayload(state: NativeState): JSONObject {
+        val topDp = state.insets.top / density
+        val rightDp = state.insets.right / density
+        val bottomDp = state.insets.bottom / density
+        val leftDp = state.insets.left / density
+        val keyboardDp = state.keyboardHeight / density
+        val computedBottom = if (state.keyboardVisible) 0f else bottomDp
+        val screenCornerRadiusDp = state.screenCornerRadius / density
+
+        return JSONObject()
+            .put("top", topDp.toDouble())
+            .put("right", rightDp.toDouble())
+            .put("bottom", bottomDp.toDouble())
+            .put("left", leftDp.toDouble())
+            .put("bottomComputed", computedBottom.toDouble())
+            .put("contentBottomPadding", computedBottom.toDouble())
+            .put("screenCornerRadius", screenCornerRadiusDp.toDouble())
+            .put("keyboardHeight", keyboardDp.toDouble())
+            .put("keyboardVisible", state.keyboardVisible)
+    }
+
+    /**
+     * Native updates only call the document-start receiver. The receiver owns
+     * DOM timing, validation, deduplication and event dispatch.
+     */
+    private fun injectStateToWebView(state: NativeState) {
         webView?.let { wv ->
-            // 页面尚未加载完成时跳过（documentElement 可能为 null）
-            val url = wv.url
-            if (url == null || url.isEmpty()) return@let
-            val density = activity.resources.displayMetrics.density
-            val topDp = insets.top / density
-            val rightDp = insets.right / density
-            val bottomDp = insets.bottom / density
-            val leftDp = insets.left / density
-            val keyboardDp = keyboardHeight / density
-            val computedBottom = maxOf(bottomDp, 48f)
-            val screenCornerRadiusDp = getScreenCornerRadiusPx() / density
+            val payload = createStatePayload(state)
+
             val jsCode = """
                 (function() {
-                    var style = document.documentElement.style;
-                    style.setProperty('--safe-area-inset-top', '${topDp}px');
-                    style.setProperty('--safe-area-inset-right', '${rightDp}px');
-                    style.setProperty('--safe-area-inset-bottom', '${bottomDp}px');
-                    style.setProperty('--safe-area-inset-left', '${leftDp}px');
-                    style.setProperty('--safe-area-top', '${topDp}px');
-                    style.setProperty('--safe-area-right', '${rightDp}px');
-                    style.setProperty('--safe-area-bottom', '${bottomDp}px');
-                    style.setProperty('--safe-area-left', '${leftDp}px');
-                    style.setProperty('--safe-area-bottom-computed', '${computedBottom}px');
-                    style.setProperty('--safe-area-bottom-min', '48px');
-                    style.setProperty('--content-bottom-padding', '${computedBottom + 16}px');
-                    style.setProperty('--keyboard-height', '${keyboardDp}px');
-                    style.setProperty('--keyboard-visible', '${if (isKeyboardVisible) "1" else "0"}');
-                    style.setProperty('--screen-corner-radius', '${screenCornerRadiusDp}px');
-                    window.dispatchEvent(new CustomEvent('safeAreaChanged', {
-                        detail: {
-                            top: $topDp,
-                            right: $rightDp,
-                            bottom: $bottomDp,
-                            left: $leftDp,
-                            screenCornerRadius: $screenCornerRadiusDp,
-                            keyboardHeight: $keyboardDp,
-                            keyboardVisible: $isKeyboardVisible
-                        }
-                    }));
+                    var api = window.$INTERNAL_API_NAME;
+                    if (api && typeof api.update === 'function') api.update($payload);
                 })();
             """.trimIndent()
 
-            wv.evaluateJavascript(jsCode, null)
+            val evaluate = {
+                if (webView === wv) wv.evaluateJavascript(jsCode, null)
+            }
+            if (Looper.myLooper() == Looper.getMainLooper()) evaluate() else wv.post { evaluate() }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        setSystemBarAppearance()
+        injectCurrentState()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        setSystemBarAppearance()
+        injectCurrentState()
+    }
+
+    override fun onDestroy(activity: AppCompatActivity) {
+        mainHandler.removeCallbacksAndMessages(null)
+        webView?.let { webView ->
+            webView.removeJavascriptInterface(NATIVE_BRIDGE_NAME)
+            ViewCompat.setOnApplyWindowInsetsListener(webView, null)
+            ViewCompat.setWindowInsetsAnimationCallback(webView, null)
+        }
+        webView = null
+        super.onDestroy(activity)
     }
 
     /**
@@ -325,23 +395,26 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         val result = JSObject()
 
         if (windowInsets != null) {
-            val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val safeInsets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
             val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
             val navigationBars = windowInsets.getInsets(WindowInsetsCompat.Type.navigationBars())
 
             result.put("statusBar", statusBars.top / density)
             result.put("navigationBar", navigationBars.bottom / density)
-            result.put("top", systemBars.top / density)
-            result.put("bottom", systemBars.bottom / density)
-            result.put("left", systemBars.left / density)
-            result.put("right", systemBars.right / density)
+            result.put("top", safeInsets.top / density)
+            result.put("bottom", safeInsets.bottom / density)
+            result.put("left", safeInsets.left / density)
+            result.put("right", safeInsets.right / density)
         } else {
+            val fallback = cachedState?.insets ?: SafeAreaInsets(0, 0, 0, 0)
             result.put("statusBar", 0)
             result.put("navigationBar", 0)
-            result.put("top", cachedInsets.top / density)
-            result.put("bottom", cachedInsets.bottom / density)
-            result.put("left", cachedInsets.left / density)
-            result.put("right", cachedInsets.right / density)
+            result.put("top", fallback.top / density)
+            result.put("bottom", fallback.bottom / density)
+            result.put("left", fallback.left / density)
+            result.put("right", fallback.right / density)
         }
 
         invoke.resolve(result)
@@ -360,7 +433,11 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
 
         if (windowInsets != null) {
             val imeVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime())
-            val imeHeightPx = windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            val imeHeightPx = if (imeVisible) {
+                windowInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            } else {
+                0
+            }
             val density = activity.resources.displayMetrics.density
             val imeHeightDp = Math.round(imeHeightPx / density)
 
@@ -379,6 +456,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             enable()
             setTransparentSystemBars()
+            setSystemBarAppearance()
         }
         invoke.resolve()
     }
