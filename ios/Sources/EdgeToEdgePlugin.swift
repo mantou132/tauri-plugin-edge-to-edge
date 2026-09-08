@@ -28,7 +28,7 @@ private final class EdgeToEdgeMessageHandler: NSObject, WKScriptMessageHandler {
 // MARK: - Edge-to-Edge Plugin
 // 为 iOS 提供全屏沉浸式体验支持
 
-class EdgeToEdgePlugin: Plugin {
+class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     private var isSetup = false
     private weak var webviewRef: WKWebView?
     private var keyboardHeight: CGFloat = 0
@@ -36,6 +36,8 @@ class EdgeToEdgePlugin: Plugin {
     private var stageManagerOffset: CGFloat = 0  // iPad Stage Manager 支持
     private var originalInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior?
     private var originalScrollIndicatorAdjustment: Bool?
+    private var originalBounces: Bool?
+    private var isResettingScroll = false
     private lazy var deviceScreenCornerRadius = Self.screenCornerRadius(
         for: Self.hardwareModelIdentifier()
     )
@@ -50,6 +52,7 @@ class EdgeToEdgePlugin: Plugin {
         webviewRef = webview
         originalInsetAdjustmentBehavior = webview.scrollView.contentInsetAdjustmentBehavior
         originalScrollIndicatorAdjustment = webview.scrollView.automaticallyAdjustsScrollIndicatorInsets
+        originalBounces = webview.scrollView.bounces
 
         // document-start 脚本会在首次加载、刷新和导航时请求最新状态。
         let handler = EdgeToEdgeMessageHandler(plugin: self)
@@ -73,13 +76,58 @@ class EdgeToEdgePlugin: Plugin {
     // MARK: - Setup
     
     private func setupEdgeToEdge(webview: WKWebView) {
-        // Keep the WebView frame edge-to-edge without taking over its colors,
-        // scrolling delegate or bounce behavior.
         if #available(iOS 11.0, *) {
             webview.scrollView.contentInsetAdjustmentBehavior = .never
         }
         webview.scrollView.automaticallyAdjustsScrollIndicatorInsets = false
+        webview.scrollView.bounces = false
+        webview.scrollView.delegate = self
+
+        // 移除 WebKit 内部针对键盘的自动滚动和窗口移动监听
+        removeDefaultKeyboardObservers(webview: webview)
+
+        resetScrollView(webview: webview)
         NSLog("[EdgeToEdge] Edge-to-edge mode enabled")
+    }
+
+    private func removeDefaultKeyboardObservers(webview: WKWebView) {
+        let nc = NotificationCenter.default
+        let keyboardNotifications = [
+            UIResponder.keyboardWillShowNotification,
+            UIResponder.keyboardDidShowNotification,
+            UIResponder.keyboardWillHideNotification,
+            UIResponder.keyboardDidHideNotification,
+            UIResponder.keyboardWillChangeFrameNotification,
+            UIResponder.keyboardDidChangeFrameNotification
+        ]
+        for name in keyboardNotifications {
+            nc.removeObserver(webview, name: name, object: nil)
+        }
+    }
+
+    private func resetScrollView(webview: WKWebView) {
+        let scrollView = webview.scrollView
+        if scrollView.contentInset != .zero {
+            scrollView.contentInset = .zero
+        }
+        if scrollView.scrollIndicatorInsets != .zero {
+            scrollView.scrollIndicatorInsets = .zero
+        }
+        if scrollView.contentOffset != .zero {
+            scrollView.contentOffset = .zero
+        }
+    }
+
+    // MARK: - UIScrollViewDelegate
+
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard !isResettingScroll else { return }
+        if scrollView.contentOffset != .zero || scrollView.contentInset != .zero {
+            isResettingScroll = true
+            scrollView.contentOffset = .zero
+            scrollView.contentInset = .zero
+            isResettingScroll = false
+        }
     }
     
     // MARK: - Keyboard Observers (借鉴 Capacitor 官方 Keyboard 插件)
@@ -172,6 +220,7 @@ class EdgeToEdgePlugin: Plugin {
     }
 
     private func handleKeyboardWillShow(webview: WKWebView, notification: Notification) {
+        resetScrollView(webview: webview)
         guard let height = keyboardHeight(webview: webview, notification: notification) else { return }
         keyboardHeight = height
         isKeyboardVisible = true
@@ -181,6 +230,7 @@ class EdgeToEdgePlugin: Plugin {
     }
 
     private func handleKeyboardDidShow(webview: WKWebView, notification: Notification) {
+        resetScrollView(webview: webview)
         if let height = keyboardHeight(webview: webview, notification: notification) {
             keyboardHeight = height
         }
@@ -190,6 +240,7 @@ class EdgeToEdgePlugin: Plugin {
     }
 
     private func handleKeyboardWillHide(webview: WKWebView, notification _: Notification) {
+        resetScrollView(webview: webview)
         keyboardHeight = 0
         isKeyboardVisible = false
 
@@ -198,6 +249,7 @@ class EdgeToEdgePlugin: Plugin {
     }
 
     private func handleKeyboardDidHide(webview: WKWebView, notification _: Notification) {
+        resetScrollView(webview: webview)
         stageManagerOffset = 0
         keyboardHeight = 0
         isKeyboardVisible = false
@@ -356,6 +408,10 @@ class EdgeToEdgePlugin: Plugin {
             if let adjustsIndicators = originalScrollIndicatorAdjustment {
                 webview.scrollView.automaticallyAdjustsScrollIndicatorInsets = adjustsIndicators
             }
+            if let bounces = originalBounces {
+                webview.scrollView.bounces = bounces
+            }
+            webview.scrollView.delegate = nil
         }
         invoke.resolve()
     }
@@ -376,6 +432,7 @@ class EdgeToEdgePlugin: Plugin {
         for token in observerTokens {
             NotificationCenter.default.removeObserver(token)
         }
+        webviewRef?.scrollView.delegate = nil
         webviewRef?.configuration.userContentController.removeScriptMessageHandler(
             forName: edgeToEdgeBridgeName
         )
