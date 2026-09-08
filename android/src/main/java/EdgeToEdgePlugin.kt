@@ -6,6 +6,10 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.view.RoundedCorner
 import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
@@ -24,11 +28,17 @@ import org.json.JSONObject
 
 private class EdgeToEdgeStateBridge(
     private val onGetState: () -> String,
-    private val onRequestState: () -> Unit
+    private val onRequestState: () -> Unit,
+    private val onPageLoaded: () -> Unit
 ) {
     @JavascriptInterface
     fun getState(): String {
         return onGetState.invoke()
+    }
+
+    @JavascriptInterface
+    fun pageLoaded() {
+        onPageLoaded.invoke()
     }
 
     @JavascriptInterface
@@ -50,8 +60,9 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density = activity.resources.displayMetrics.density
-    private val javascriptBridge = EdgeToEdgeStateBridge(::getCachedStateJson, ::injectCurrentState)
+    private val javascriptBridge = EdgeToEdgeStateBridge(::getCachedStateJson, ::injectCurrentState, ::hideLaunchScreen)
     private var webView: WebView? = null
+    private var launchScreen: FrameLayout? = null
 
     data class SafeAreaInsets(val top: Int, val right: Int, val bottom: Int, val left: Int)
 
@@ -72,6 +83,8 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         this.webView = webView
 
         activity.runOnUiThread {
+            showLaunchScreen()
+
             // document-start 脚本会在首次加载、刷新和导航时请求最新状态。
             webView.addJavascriptInterface(javascriptBridge, NATIVE_BRIDGE_NAME)
 
@@ -95,6 +108,54 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         println("[EdgeToEdge] Plugin loaded successfully")
+    }
+
+    private fun showLaunchScreen() {
+        val overlay = FrameLayout(activity).apply {
+            val isDark = activity.resources.configuration.uiMode and
+                Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+            setBackgroundColor(if (isDark) Color.BLACK else Color.WHITE)
+            isClickable = true
+            val icon = ImageView(activity).apply {
+                setImageDrawable(activity.applicationInfo.loadIcon(activity.packageManager))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            // Android 12+ rasterizes the launch drawable on a 108dp canvas, then
+            // displays it at 192dp when no icon background is set. Match its
+            // effective scale for the 80dp artwork rather than its 288dp intrinsic size.
+            val iconSizeDp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                80f * 192f / 108f
+            } else {
+                80f
+            }
+            val iconSize = Math.round(iconSizeDp * density)
+            addView(icon, FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER))
+        }
+        launchScreen = overlay
+        (activity.window.decorView as ViewGroup).addView(
+            overlay,
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+    }
+
+    private fun hideLaunchScreen() {
+        mainHandler.post {
+            val overlay = launchScreen ?: return@post
+            val remove = {
+                (overlay.parent as? ViewGroup)?.removeView(overlay)
+                launchScreen = null
+            }
+            val wv = webView
+            if (wv != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                // Wait until the loaded document can actually be drawn.
+                wv.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) { remove() }
+                })
+            } else {
+                remove()
+            }
+        }
     }
 
     /**

@@ -19,8 +19,13 @@ private final class EdgeToEdgeMessageHandler: NSObject, WKScriptMessageHandler {
         didReceive message: WKScriptMessage
     ) {
         guard message.name == edgeToEdgeBridgeName, message.frameInfo.isMainFrame else { return }
+        guard let action = message.body as? String else { return }
         DispatchQueue.main.async { [weak plugin] in
-            plugin?.injectCurrentState()
+            switch action {
+            case "pageLoaded": plugin?.hideLaunchScreen()
+            case "requestState": plugin?.injectCurrentState()
+            default: break
+            }
         }
     }
 }
@@ -30,6 +35,7 @@ private final class EdgeToEdgeMessageHandler: NSObject, WKScriptMessageHandler {
 
 class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     private var isSetup = false
+    private var launchScreen: UIView?
     private weak var webviewRef: WKWebView?
     private var keyboardHeight: CGFloat = 0
     private var isKeyboardVisible = false
@@ -51,6 +57,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         guard !isSetup else { return }
         isSetup = true
         webviewRef = webview
+        showLaunchScreen(webview: webview)
         originalInsetAdjustmentBehavior = webview.scrollView.contentInsetAdjustmentBehavior
         originalScrollIndicatorAdjustment = webview.scrollView.automaticallyAdjustsScrollIndicatorInsets
         originalBounces = webview.scrollView.bounces
@@ -75,6 +82,47 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         NSLog("[EdgeToEdge] Plugin loaded successfully")
     }
     
+    private func showLaunchScreen(webview: WKWebView) {
+        // Reuse the system launch layout so the handoff cannot drift in appearance.
+        if let name = Bundle.main.object(forInfoDictionaryKey: "UILaunchStoryboardName") as? String,
+           let controller = UIStoryboard(name: name, bundle: .main).instantiateInitialViewController() {
+            let overlay = controller.view!
+            overlay.frame = webview.bounds
+            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            webview.addSubview(overlay)
+            launchScreen = overlay
+            return
+        }
+        let overlay = UIView(frame: webview.bounds)
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlay.backgroundColor = .systemBackground
+        let iconKey = UIDevice.current.userInterfaceIdiom == .pad ? "CFBundleIcons~ipad" : "CFBundleIcons"
+        let icons = (Bundle.main.object(forInfoDictionaryKey: iconKey)
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleIcons")) as? [String: Any]
+        let primary = icons?["CFBundlePrimaryIcon"] as? [String: Any]
+        let files = primary?["CFBundleIconFiles"] as? [String]
+        let icon = UIImageView(image: files?.last.flatMap { UIImage(named: $0) })
+        icon.contentMode = .scaleAspectFit
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.layer.cornerRadius = 18
+        icon.clipsToBounds = true
+        overlay.addSubview(icon)
+        NSLayoutConstraint.activate([
+            icon.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 80),
+            icon.heightAnchor.constraint(equalToConstant: 80)
+        ])
+        // A WebView subview stays above web content without replacing Tauri's delegates.
+        webview.addSubview(overlay)
+        launchScreen = overlay
+    }
+
+    fileprivate func hideLaunchScreen() {
+        launchScreen?.removeFromSuperview()
+        launchScreen = nil
+    }
+
     // MARK: - Setup
     
     private func setupEdgeToEdge(webview: WKWebView) {

@@ -8,6 +8,7 @@
 - **Android**: 启用 Edge-to-Edge 模式，透明系统栏
 - **首帧 CSS 变量**: 在 HTML 解析前自动注入 `--safe-area-inset-*` 等 CSS 变量
 - **刷新自动恢复**: 页面刷新或导航后自动重新读取并注入当前原生 Insets
+- **启动图标**: Android / iOS 默认显示居中的应用图标，页面 `window.load` 后自动移除原生启动层
 - **键盘支持**: 监听键盘显示/隐藏，动态更新键盘高度变量
 
 ## 安装
@@ -50,6 +51,23 @@ pub fn run() {
 `--safe-area-inset-*` 和 `--safe-area-*` 始终表示未经加工的系统安全区。键盘显示时，
 只有用于内容布局的 `--safe-area-bottom-computed` 和 `--content-bottom-padding` 变为
 `0px`；插件不再内置 `34px`、`48px` 或额外 `16px` 这类应用层间距。
+
+### 启动画面
+
+Android 在系统启动屏结束后显示独立的原生启动层，使用应用图标并以完整窗口居中。
+Android 12+ 按系统无图标背景时的 `192 / 108` 缩放比例显示 80dp 图标（约 142.2dp），
+对应 AgentDeck 当前启动 drawable 的实际显示尺寸；Android 11 及以下仍为 80dp。
+背景跟随系统深浅色。这里的尺寸匹配基于当前启动资源，不代表任意应用主题或厂商
+修改后的启动布局都相同。
+
+无需前端调用。页面触发 `window.load` 后移除；Android 6+ 还会等待 WebView
+确认页面可绘制。刷新、后续导航、切回前台不会再次显示。
+
+iOS 优先复用应用 `UILaunchStoryboardName` 指定的 storyboard，让系统启动屏与插件
+启动层使用相同布局；未指定时从 `CFBundleIcons` / `CFBundleIcons~ipad` 读取主图标。
+此启动层覆盖插件初始化到页面加载完成的阶段，不替代操作系统在原生插件初始化前
+显示的 Launch Screen / SplashScreen。`load` 不代表应用异步数据已经加载完成；
+若页面始终未触发 `load`，启动层会一直保留。
 
 ### CSS 变量
 

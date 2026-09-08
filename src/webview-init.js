@@ -241,6 +241,20 @@
     }
   }
 
+  function pageLoaded() {
+    var androidBridge = window[nativeBridgeName];
+    if (androidBridge && typeof androidBridge.pageLoaded === 'function') {
+      androidBridge.pageLoaded();
+    }
+    var handlers = window.webkit && window.webkit.messageHandlers;
+    var iosBridge = handlers && handlers[nativeBridgeName];
+    if (iosBridge) iosBridge.postMessage('pageLoaded');
+  }
+
+  // The native overlay is created once at plugin startup, not on later navigations.
+  if (document.readyState === 'complete') pageLoaded();
+  else window.addEventListener('load', pageLoaded, { once: true });
+
   observeViewport();
   ensureRootState();
   requestNativeState();
