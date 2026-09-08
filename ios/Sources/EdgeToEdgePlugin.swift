@@ -37,6 +37,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     private var originalInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior?
     private var originalScrollIndicatorAdjustment: Bool?
     private var originalBounces: Bool?
+    private var originalAllowsBackForwardNavigationGestures: Bool?
     private var isResettingScroll = false
     private lazy var deviceScreenCornerRadius = Self.screenCornerRadius(
         for: Self.hardwareModelIdentifier()
@@ -53,6 +54,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         originalInsetAdjustmentBehavior = webview.scrollView.contentInsetAdjustmentBehavior
         originalScrollIndicatorAdjustment = webview.scrollView.automaticallyAdjustsScrollIndicatorInsets
         originalBounces = webview.scrollView.bounces
+        originalAllowsBackForwardNavigationGestures = webview.allowsBackForwardNavigationGestures
 
         // document-start 脚本会在首次加载、刷新和导航时请求最新状态。
         let handler = EdgeToEdgeMessageHandler(plugin: self)
@@ -82,6 +84,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         webview.scrollView.automaticallyAdjustsScrollIndicatorInsets = false
         webview.scrollView.bounces = false
         webview.scrollView.delegate = self
+        webview.allowsBackForwardNavigationGestures = false
 
         // 移除 WebKit 内部针对键盘的自动滚动和窗口移动监听
         removeDefaultKeyboardObservers(webview: webview)
@@ -410,6 +413,9 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             }
             if let bounces = originalBounces {
                 webview.scrollView.bounces = bounces
+            }
+            if let allowsGestures = originalAllowsBackForwardNavigationGestures {
+                webview.allowsBackForwardNavigationGestures = allowsGestures
             }
             webview.scrollView.delegate = nil
         }
