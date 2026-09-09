@@ -10,6 +10,7 @@
 - **刷新自动恢复**: 页面刷新或导航后自动重新读取并注入当前原生 Insets
 - **启动图标**: Android / iOS 默认显示居中的应用图标，页面 `window.load` 后自动移除原生启动层
 - **键盘支持**: 监听键盘显示/隐藏，动态更新键盘高度变量
+- **webproxy 自定义协议**: 通过 `toWebproxyUrl(<url>)` 转发任意 http(s) 请求，绕过 CSP 限制
 
 ## 安装
 
@@ -132,10 +133,12 @@ import {
   getSafeAreaInsets,
   getKeyboardInfo,
   onSafeAreaChanged,
+  toWebproxyUrl,
 } from 'tauri-plugin-edge-to-edge-api'
 
 const stop = onSafeAreaChanged((state) => console.log(state))
 const insets = await getSafeAreaInsets()
+const res = await fetch(toWebproxyUrl('https://api.example.com/data'))
 ```
 
 ## 平台支持

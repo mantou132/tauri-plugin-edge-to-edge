@@ -18,6 +18,9 @@ links = "tauri-plugin-edge-to-edge"
 tauri = { version = "2.9.2" }
 serde = "1.0"
 thiserror = "2"
+# reqwest 0.13 uses rustls-platform-verifier on Android, which requires extra JNI
+# initialization. 0.12 + WebPKI roots stays self-contained inside the Rust plugin.
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots", "cookies"] }
 
 [build-dependencies]
 tauri-plugin = { version = "2.5.1", features = ["build"] }

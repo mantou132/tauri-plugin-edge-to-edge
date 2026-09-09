@@ -13,6 +13,7 @@ mod mobile;
 mod commands;
 mod error;
 mod models;
+mod webproxy;
 
 pub use error::{Error, Result};
 
@@ -49,6 +50,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
   // published crate; `guest-js/` is the separately published npm API source.
   #[cfg(mobile)]
   let builder = builder.js_init_script(include_str!("webview-init.js"));
+
+  // Register before Tauri creates any webviews. The logical proxy URL keeps
+  // the original host/path so relative resources inside iframe documents keep
+  // using the same proxy origin.
+  let builder = webproxy::register(builder);
 
   builder
     .setup(|app, api| {
