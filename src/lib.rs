@@ -56,6 +56,16 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
   // using the same proxy origin.
   let builder = webproxy::register(builder);
 
+  // Intercept unknown URL schemes (e.g. baiduboxapp://, weixin://) so WebView
+  // does not attempt to load them and fail with net::ERR_UNKNOWN_URL_SCHEME.
+  let builder = builder.on_navigation(|_webview, url| {
+    let scheme = url.scheme();
+    matches!(
+      scheme,
+      "http" | "https" | "webproxy" | "tauri" | "asset" | "about" | "blob" | "data"
+    )
+  });
+
   builder
     .setup(|app, api| {
       #[cfg(mobile)]

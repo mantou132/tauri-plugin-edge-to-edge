@@ -129,6 +129,8 @@ async fn forward(target: Url, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
   let upstream_origin = target.origin().ascii_serialization();
   let mut upstream = client().request(method, target.clone());
 
+  let mut has_user_agent = false;
+
   for (name, value) in &parts.headers {
     let lower = name.as_str().to_ascii_lowercase();
 
@@ -139,11 +141,22 @@ async fn forward(target: Url, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
       continue;
     }
 
+    if lower == "user-agent" {
+      has_user_agent = true;
+    }
+
     if should_strip_request_header(&lower) {
       continue;
     }
 
     upstream = upstream.header(name.as_str(), value.as_bytes());
+  }
+
+  if !has_user_agent {
+    upstream = upstream.header(
+      "user-agent",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    );
   }
 
   // HTML may be rewritten below, so ask the server for identity encoding.
@@ -187,7 +200,7 @@ async fn forward(target: Url, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
 
   // Only rewrite complete HTML documents. Never modify range responses.
   let (body, body_changed) = if status == 200 && is_html && identity_encoded {
-    strip_meta_frame_policies(&bytes)
+    rewrite_html(&bytes)
   } else {
     (bytes.to_vec(), false)
   };
@@ -267,6 +280,71 @@ fn error_response(status: StatusCode, message: &str) -> Response<Vec<u8>> {
     .header("access-control-allow-origin", "*")
     .body(message.as_bytes().to_vec())
     .unwrap()
+}
+
+const STATE_BRIDGE_SCRIPT: &str = include_str!("webproxy_bridge.js");
+const STATE_BRIDGE_SCRIPT_OPEN: &[u8] = b"<script data-webproxy-state-bridge>";
+const STATE_BRIDGE_SCRIPT_CLOSE: &[u8] = b"</script>";
+
+fn rewrite_html(input: &[u8]) -> (Vec<u8>, bool) {
+  let (html, policies_changed) = strip_meta_frame_policies(input);
+  let (html, bridge_injected) = inject_state_bridge(&html);
+  (html, policies_changed || bridge_injected)
+}
+
+fn inject_state_bridge(input: &[u8]) -> (Vec<u8>, bool) {
+  // Match the actual tag we inject rather than any arbitrary occurrence of the
+  // marker attribute name in page text or JavaScript.
+  if contains_ascii_case_insensitive(input, STATE_BRIDGE_SCRIPT_OPEN) {
+    return (input.to_vec(), false);
+  }
+
+  let insert_at = find_start_tag(input, b"<head")
+    .and_then(|start| find_tag_end(input, start))
+    .map(|end| end + 1)
+    // If the document has no explicit <head>, insert immediately after <html>.
+    // The HTML parser will place the script into the implicit head, keeping the
+    // bridge early enough to intercept page initialization behavior.
+    .or_else(|| {
+      find_start_tag(input, b"<html")
+        .and_then(|start| find_tag_end(input, start))
+        .map(|end| end + 1)
+    })
+    // Extremely small or malformed HTML: executing first is preferable to
+    // appending after </html>, because the bridge should be installed ASAP.
+    .unwrap_or(0);
+
+  let script = STATE_BRIDGE_SCRIPT.as_bytes();
+  let extra_len = STATE_BRIDGE_SCRIPT_OPEN.len() + script.len() + STATE_BRIDGE_SCRIPT_CLOSE.len();
+  let mut output = Vec::with_capacity(input.len() + extra_len);
+
+  output.extend_from_slice(&input[..insert_at]);
+  output.extend_from_slice(STATE_BRIDGE_SCRIPT_OPEN);
+  output.extend_from_slice(script);
+  output.extend_from_slice(STATE_BRIDGE_SCRIPT_CLOSE);
+  output.extend_from_slice(&input[insert_at..]);
+
+  (output, true)
+}
+
+fn find_start_tag(input: &[u8], needle: &[u8]) -> Option<usize> {
+  let mut from = 0usize;
+
+  while from + needle.len() <= input.len() {
+    let relative = input[from..]
+      .windows(needle.len())
+      .position(|window| ascii_eq_ignore_case(window, needle))?;
+    let start = from + relative;
+    let next = input.get(start + needle.len()).copied();
+
+    if next.map_or(true, |byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')) {
+      return Some(start);
+    }
+
+    from = start + needle.len();
+  }
+
+  None
 }
 
 /// Removes CSP/X-Frame-Options policies declared through `<meta http-equiv>`.
@@ -394,5 +472,49 @@ mod tests {
     assert!(!html.contains("HTTP-EQUIV='Content-Security-Policy'"));
     assert!(html.contains("<meta charset=\"utf-8\">"));
     assert!(html.contains("name=\"description\""));
+  }
+
+  #[test]
+  fn injects_state_bridge_at_start_of_head() {
+    let html = br#"<!doctype html><html><head><title>Hello</title></head><body>ok</body></html>"#;
+    let (html, changed) = rewrite_html(html);
+    let html = String::from_utf8(html).unwrap();
+
+    assert!(changed);
+    let head = html.find("<head>").unwrap();
+    let bridge = html.find("data-webproxy-state-bridge").unwrap();
+    let title = html.find("<title>Hello</title>").unwrap();
+    assert!(head < bridge && bridge < title);
+  }
+
+  #[test]
+  fn does_not_inject_state_bridge_twice() {
+    let html = br#"<!doctype html><head><script data-webproxy-state-bridge></script></head>"#;
+    let (html, changed) = inject_state_bridge(html);
+    let html = String::from_utf8(html).unwrap();
+
+    assert!(!changed);
+    assert_eq!(html.matches("data-webproxy-state-bridge").count(), 1);
+  }
+
+  #[test]
+  fn injects_state_bridge_after_html_when_head_is_missing() {
+    let html = br#"<!doctype html><html><body>ok</body></html>"#;
+    let (html, changed) = inject_state_bridge(html);
+    let html = String::from_utf8(html).unwrap();
+
+    assert!(changed);
+    let html_tag = html.find("<html>").unwrap();
+    let bridge = html.find("data-webproxy-state-bridge").unwrap();
+    let body = html.find("<body>").unwrap();
+    assert!(html_tag < bridge && bridge < body);
+  }
+
+  #[test]
+  fn bridge_script_must_not_close_script_element() {
+    assert!(
+      !STATE_BRIDGE_SCRIPT.to_ascii_lowercase().contains("</script"),
+      "webproxy_bridge.js must not contain a literal </script"
+    );
   }
 }
