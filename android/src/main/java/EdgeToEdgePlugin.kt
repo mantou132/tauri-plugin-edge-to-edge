@@ -15,6 +15,7 @@ import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -221,8 +222,10 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     insets: WindowInsetsCompat,
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>
                 ): WindowInsetsCompat {
+                    // Keep native state based on the real insets, but never expose
+                    // system bars / display cutouts to WebView CSS env().
                     publishWindowInsets(insets)
-                    return insets
+                    return zeroSafeAreaInsets(insets)
                 }
 
                 override fun onStart(
@@ -279,6 +282,7 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
      */
     private fun setupWindowInsetsListener(webView: WebView) {
         ViewCompat.setOnApplyWindowInsetsListener(webView) { _, windowInsets ->
+            // Read and publish the original values first so --safe-area-* stays real.
             val state = publishWindowInsets(windowInsets)
             println(
                 "[EdgeToEdge] WindowInsets - Top:${state.insets.top}, " +
@@ -286,10 +290,22 @@ class EdgeToEdgePlugin(private val activity: Activity) : Plugin(activity) {
                     "Keyboard:${state.keyboardVisible}(${state.keyboardHeight})"
             )
 
-            windowInsets
+            // Then zero only the safe-area sources passed to WebView. IME is left
+            // untouched so modern WebView visual-viewport / keyboard behavior keeps
+            // working normally.
+            zeroSafeAreaInsets(windowInsets)
         }
 
         ViewCompat.requestApplyInsets(webView)
+    }
+
+    private fun zeroSafeAreaInsets(windowInsets: WindowInsetsCompat): WindowInsetsCompat {
+        val safeAreaTypes =
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+
+        return WindowInsetsCompat.Builder(windowInsets)
+            .setInsets(safeAreaTypes, Insets.NONE)
+            .build()
     }
 
     /**

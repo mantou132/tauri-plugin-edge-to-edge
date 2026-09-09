@@ -3,9 +3,70 @@ import Tauri
 import UIKit
 import WebKit
 import Darwin
+import ObjectiveC.runtime
 
 private let edgeToEdgeBridgeName = "__TAURI_EDGE_TO_EDGE_NATIVE__"
 private let edgeToEdgeInternalApiName = "__TAURI_EDGE_TO_EDGE_INTERNAL__"
+
+
+/// Tauri hands plugins an already-created WKWebView, so we cannot choose a
+/// subclass at construction time. Create a tiny runtime subclass of the exact
+/// concrete WebView class and override only `safeAreaInsets`.
+///
+/// The WebView frame remains edge-to-edge. WebKit sees a zero safe area, while
+/// the plugin still reads the real values from `UIWindow.safeAreaInsets` and
+/// exposes them as CSS custom properties.
+private func installZeroSafeAreaInsets(on webview: WKWebView) -> AnyClass? {
+    guard let originalClass: AnyClass = object_getClass(webview) else { return nil }
+
+    let originalName = NSStringFromClass(originalClass)
+    let safeName = originalName
+        .replacingOccurrences(of: ".", with: "_")
+        .replacingOccurrences(of: "-", with: "_")
+    let subclassName = "\(safeName)_EdgeToEdgeZeroSafeArea"
+
+    let subclass: AnyClass
+    if let existing = NSClassFromString(subclassName) {
+        subclass = existing
+    } else {
+        guard
+            let created = objc_allocateClassPair(originalClass, subclassName, 0),
+            let originalMethod = class_getInstanceMethod(
+                originalClass,
+                #selector(getter: UIView.safeAreaInsets)
+            )
+        else {
+            return nil
+        }
+
+        let getter: @convention(block) (AnyObject) -> UIEdgeInsets = { _ in .zero }
+        let added = class_addMethod(
+            created,
+            #selector(getter: UIView.safeAreaInsets),
+            imp_implementationWithBlock(getter),
+            method_getTypeEncoding(originalMethod)
+        )
+        guard added else {
+            objc_disposeClassPair(created)
+            return nil
+        }
+
+        objc_registerClassPair(created)
+        subclass = created
+    }
+
+    object_setClass(webview, subclass)
+    webview.safeAreaInsetsDidChange()
+    webview.setNeedsLayout()
+    return originalClass
+}
+
+private func restoreSafeAreaInsets(on webview: WKWebView, originalClass: AnyClass?) {
+    guard let originalClass else { return }
+    object_setClass(webview, originalClass)
+    webview.safeAreaInsetsDidChange()
+    webview.setNeedsLayout()
+}
 
 private final class EdgeToEdgeMessageHandler: NSObject, WKScriptMessageHandler {
     weak var plugin: EdgeToEdgePlugin?
@@ -37,6 +98,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     private var isSetup = false
     private var launchScreen: UIView?
     private weak var webviewRef: WKWebView?
+    private var originalWebViewClass: AnyClass?
     private var keyboardHeight: CGFloat = 0
     private var isKeyboardVisible = false
     private var stageManagerOffset: CGFloat = 0  // iPad Stage Manager 支持
@@ -50,13 +112,19 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     )
     private var messageHandler: EdgeToEdgeMessageHandler?
     private var observerTokens: [NSObjectProtocol] = []
-    
+
     // MARK: - Lifecycle
-    
+
     @objc public override func load(webview: WKWebView) {
         guard !isSetup else { return }
         isSetup = true
         webviewRef = webview
+
+        // Keep the WKWebView full-screen, but make WebKit's CSS
+        // env(safe-area-inset-*) resolve to zero. Real values still come from
+        // webview.window?.safeAreaInsets below.
+        originalWebViewClass = installZeroSafeAreaInsets(on: webview)
+
         showLaunchScreen(webview: webview)
         originalInsetAdjustmentBehavior = webview.scrollView.contentInsetAdjustmentBehavior
         originalScrollIndicatorAdjustment = webview.scrollView.automaticallyAdjustsScrollIndicatorInsets
@@ -70,7 +138,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
 
         // 设置 Edge-to-Edge
         setupEdgeToEdge(webview: webview)
-        
+
         // 注册键盘和窗口状态监听。
         registerKeyboardObservers(webview: webview)
 
@@ -78,10 +146,10 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.injectCurrentState()
         }
-        
+
         NSLog("[EdgeToEdge] Plugin loaded successfully")
     }
-    
+
     private func showLaunchScreen(webview: WKWebView) {
         // Reuse the system launch layout so the handoff cannot drift in appearance.
         if let name = Bundle.main.object(forInfoDictionaryKey: "UILaunchStoryboardName") as? String,
@@ -124,7 +192,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     }
 
     // MARK: - Setup
-    
+
     private func setupEdgeToEdge(webview: WKWebView) {
         if #available(iOS 11.0, *) {
             webview.scrollView.contentInsetAdjustmentBehavior = .never
@@ -180,12 +248,12 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             isResettingScroll = false
         }
     }
-    
+
     // MARK: - Keyboard Observers (借鉴 Capacitor 官方 Keyboard 插件)
-    
+
     private func registerKeyboardObservers(webview: WKWebView) {
         let nc = NotificationCenter.default
-        
+
         observerTokens.append(nc.addObserver(
             forName: UIResponder.keyboardWillShowNotification,
             object: nil,
@@ -194,7 +262,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             guard let self = self, let wv = webview else { return }
             self.handleKeyboardWillShow(webview: wv, notification: notification)
         })
-        
+
         observerTokens.append(nc.addObserver(
             forName: UIResponder.keyboardDidShowNotification,
             object: nil,
@@ -203,7 +271,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             guard let self = self, let wv = webview else { return }
             self.handleKeyboardDidShow(webview: wv, notification: notification)
         })
-        
+
         observerTokens.append(nc.addObserver(
             forName: UIResponder.keyboardWillHideNotification,
             object: nil,
@@ -212,7 +280,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             guard let self = self, let wv = webview else { return }
             self.handleKeyboardWillHide(webview: wv, notification: notification)
         })
-        
+
         observerTokens.append(nc.addObserver(
             forName: UIResponder.keyboardDidHideNotification,
             object: nil,
@@ -239,10 +307,10 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         ) { [weak self] _ in
             self?.injectCurrentState()
         })
-        
+
         NSLog("[EdgeToEdge] Keyboard observers registered (Capacitor Keyboard official approach)")
     }
-    
+
     private func keyboardHeight(webview: WKWebView, notification: Notification) -> CGFloat? {
         guard let userInfo = notification.userInfo,
               let keyboardFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
@@ -308,7 +376,7 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
         NSLog("[EdgeToEdge] Keyboard did hide")
         injectSafeAreaInsets(webview: webview, keyboardHeight: 0, keyboardVisible: false)
     }
-    
+
     // MARK: - Safe Area Injection
 
     fileprivate func injectCurrentState() {
@@ -321,10 +389,10 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             keyboardVisible: isKeyboardVisible
         )
     }
-    
+
     private func injectSafeAreaInsets(webview: WKWebView, keyboardHeight: CGFloat, keyboardVisible: Bool) {
         guard #available(iOS 11.0, *) else { return }
-        
+
         guard let safeArea = webview.window?.safeAreaInsets else { return }
         let top = safeArea.top
         let right = safeArea.right
@@ -419,13 +487,13 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
     }
 
     // MARK: - Commands
-    
+
     @objc public func getSafeAreaInsets(_ invoke: Invoke) throws {
         guard #available(iOS 11.0, *) else {
             invoke.resolve(["top": 0, "right": 0, "bottom": 0, "left": 0])
             return
         }
-        
+
         DispatchQueue.main.async {
             let safeArea = self.webviewRef?.window?.safeAreaInsets ?? .zero
             invoke.resolve([
@@ -436,21 +504,25 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
             ])
         }
     }
-    
+
     @objc public func getKeyboardInfo(_ invoke: Invoke) throws {
         invoke.resolve([
             "keyboardHeight": self.keyboardHeight,
             "isVisible": self.isKeyboardVisible
         ])
     }
-    
+
     @objc public func enable(_ invoke: Invoke) throws {
         if let wv = webviewRef {
+            if originalWebViewClass == nil {
+                originalWebViewClass = installZeroSafeAreaInsets(on: wv)
+            }
             setupEdgeToEdge(webview: wv)
+            injectCurrentState()
         }
         invoke.resolve()
     }
-    
+
     @objc public func disable(_ invoke: Invoke) throws {
         if let webview = webviewRef {
             if let behavior = originalInsetAdjustmentBehavior {
@@ -466,27 +538,32 @@ class EdgeToEdgePlugin: Plugin, UIScrollViewDelegate {
                 webview.allowsBackForwardNavigationGestures = allowsGestures
             }
             webview.scrollView.delegate = nil
+            restoreSafeAreaInsets(on: webview, originalClass: originalWebViewClass)
+            originalWebViewClass = nil
         }
         invoke.resolve()
     }
-    
+
     @objc public func showKeyboard(_ invoke: Invoke) throws {
         // iOS 不支持编程方式显示键盘
         invoke.resolve()
     }
-    
+
     @objc public func hideKeyboard(_ invoke: Invoke) throws {
         DispatchQueue.main.async { [weak self] in
             self?.webviewRef?.endEditing(true)
         }
         invoke.resolve()
     }
-    
+
     deinit {
         for token in observerTokens {
             NotificationCenter.default.removeObserver(token)
         }
-        webviewRef?.scrollView.delegate = nil
+        if let webview = webviewRef {
+            restoreSafeAreaInsets(on: webview, originalClass: originalWebViewClass)
+            webview.scrollView.delegate = nil
+        }
         webviewRef?.configuration.userContentController.removeScriptMessageHandler(
             forName: edgeToEdgeBridgeName
         )

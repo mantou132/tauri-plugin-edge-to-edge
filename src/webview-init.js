@@ -3,10 +3,6 @@
 (function () {
   var internalApiName = '__TAURI_EDGE_TO_EDGE_INTERNAL__';
   var nativeBridgeName = '__TAURI_EDGE_TO_EDGE_NATIVE__';
-  var safeTop = 'env(safe-area-inset-top, 0px)';
-  var safeRight = 'env(safe-area-inset-right, 0px)';
-  var safeBottom = 'env(safe-area-inset-bottom, 0px)';
-  var safeLeft = 'env(safe-area-inset-left, 0px)';
   var numericKeys = [
     'top',
     'right',
@@ -19,12 +15,12 @@
   ];
 
   var state = {
-    top: safeTop,
-    right: safeRight,
-    bottom: safeBottom,
-    left: safeLeft,
-    bottomComputed: safeBottom,
-    contentBottomPadding: safeBottom,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    bottomComputed: 0,
+    contentBottomPadding: 0,
     screenCornerRadius: 0,
     keyboardHeight: 0,
     keyboardVisible: false,
